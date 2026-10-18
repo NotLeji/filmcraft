@@ -732,7 +732,8 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
                 let labels: Vec<(String, bool)> = o
                     .iter()
                     .map(|m| {
-                        let on = !(hevc && matches!(m, BitrateMode::Vbr2Pass | BitrateMode::Crf)) && !(f == Format::Av1 && *m == BitrateMode::Cqp);
+                        let on = !(hevc && matches!(m, BitrateMode::Vbr2Pass | BitrateMode::Crf)
+                            || f == Format::Av1 && *m == BitrateMode::Cqp);
                         (m.label().to_string(), on)
                     })
                     .collect();
