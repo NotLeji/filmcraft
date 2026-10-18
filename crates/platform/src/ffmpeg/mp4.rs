@@ -160,7 +160,12 @@ impl<R: Read> FragReader<R> {
                     .and_then(|o| usize::try_from(o).ok())
                     .filter(|o| o.checked_add(s.size).is_some_and(|end| end <= mdat_payload.len()))
                     .ok_or_else(|| ExportError::Encode("ffmpeg: sample offset outside its mdat".into()))?;
-                packets.push(EncodedPacket { data: mdat_payload[begin..begin + s.size].to_vec(), key: s.key, duration: s.duration, composition_offset: s.cto });
+                packets.push(EncodedPacket {
+                    data: mdat_payload[begin..begin + s.size].to_vec(),
+                    key: s.key,
+                    duration: s.duration,
+                    composition_offset: s.cto,
+                });
             }
             if self.first_cto.is_none() {
                 self.first_cto = samples.first().map(|s| i64::from(s.cto));
@@ -240,10 +245,8 @@ fn parse_moov(moov: &[u8], w: u16, h: u16, timescale: u32, trex: &mut Trex) -> R
     let mut init: Option<InitInfo> = None;
     for (typ, payload) in cur.children()? {
         match &typ {
-            b"trak" => {
-                if init.is_none() {
-                    init = parse_trak(payload, w, h, timescale)?;
-                }
+            b"trak" if init.is_none() => {
+                init = parse_trak(payload, w, h, timescale)?;
             }
             b"mvex" => {
                 let mut c = Cur::new(payload);
@@ -417,13 +420,21 @@ fn parse_traf(traf: &[u8], moof_start: u64, trex: &Trex) -> Result<Vec<Sample>> 
             return Err(ExportError::Encode("ffmpeg: sample without size".into()));
         }
         let sflags = if i == 0 {
-            if tflags & 0x0000_0400 != 0 { c.u32()? } else { first_flags.unwrap_or(def_flags) }
+            if tflags & 0x0000_0400 != 0 {
+                c.u32()?
+            } else {
+                first_flags.unwrap_or(def_flags)
+            }
         } else if tflags & 0x0000_0400 != 0 {
             c.u32()?
         } else {
             def_flags
         };
-        let cto = if tflags & 0x0000_0800 != 0 { if trun_version == 1 { c.i32()? } else { c.u32()? as i32 } } else { 0 };
+        let cto = if tflags & 0x0000_0800 != 0 {
+            if trun_version == 1 { c.i32()? } else { c.u32()? as i32 }
+        } else {
+            0
+        };
         if file_offset < 0 {
             return Err(ExportError::Encode("ffmpeg: sample before its moof".into()));
         }
