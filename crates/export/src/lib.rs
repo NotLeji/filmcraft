@@ -369,6 +369,10 @@ pub struct ExportSettings {
     /// 18 is visually near-lossless.
     #[serde(default = "default_crf")]
     pub crf: f32,
+    /// Constant quantizer of [`BitrateMode::Cqp`], 0 (best) to 51 (smallest); 20 by default.
+    /// The native quality mode of hardware encoders (QSV, NVENC, VAAPI, AMF, VideoToolbox).
+    #[serde(default = "default_cqp")]
+    pub cqp: u8,
     /// May H.264 be encoded by the system's hardware encoder (VideoToolbox on macOS, NVENC on
     /// Windows)? Off unless asked for: hardware output depends on the machine, so it is not
     /// byte-reproducible like the built-in encoder's (`determinism_tests`).
@@ -595,8 +599,15 @@ impl Default for ExportSettings {
 /// [`ExportSettings::crf`] of new settings and of settings saved before it existed.
 pub const DEFAULT_CRF: f32 = 23.0;
 
+/// [`ExportSettings::cqp`] of new settings and of settings saved before it existed.
+pub const DEFAULT_CQP: u8 = 20;
+
 fn default_crf() -> f32 {
     DEFAULT_CRF
+}
+
+fn default_cqp() -> u8 {
+    DEFAULT_CQP
 }
 
 impl ExportSettings {
@@ -639,20 +650,28 @@ impl ExportSettings {
             return Err(ExportError::Unsupported("image overlay: no image file chosen".into()));
         }
         if self.format == Format::Hevc && self.bitrate_mode == BitrateMode::Vbr2Pass {
-            return Err(ExportError::Unsupported("H.265 export has no two-pass mode: choose CBR or VBR, 1 pass".into()));
+            return Err(ExportError::Unsupported("H.265 export has no two-pass mode: choose CBR, VBR (1 pass) or CQP".into()));
         }
         if self.format == Format::Av1 && self.bitrate_mode == BitrateMode::Vbr2Pass {
             return Err(ExportError::Unsupported("AV1 export has no two-pass mode: choose CBR or VBR, 1 pass".into()));
         }
         if self.bitrate_mode == BitrateMode::Crf {
             if self.format == Format::Hevc {
-                return Err(ExportError::Unsupported("H.265 export has no CRF mode: choose CBR or VBR, 1 pass".into()));
+                return Err(ExportError::Unsupported("H.265 export has no CRF mode: choose CBR, VBR (1 pass) or CQP".into()));
             }
             if self.format == Format::Av1 {
                 return Err(ExportError::Unsupported("AV1 export has no CRF mode: choose CBR or VBR, 1 pass".into()));
             }
             if !self.crf.is_finite() || !(0.0..=51.0).contains(&self.crf) {
                 return Err(ExportError::Unsupported("CRF must be between 0 and 51".into()));
+            }
+        }
+        if self.bitrate_mode == BitrateMode::Cqp {
+            if self.format == Format::Av1 {
+                return Err(ExportError::Unsupported("AV1 export has no CQP mode: choose CBR or VBR, 1 pass".into()));
+            }
+            if self.cqp > 51 {
+                return Err(ExportError::Unsupported("CQP must be between 0 and 51".into()));
             }
         }
         Ok(())
@@ -1687,6 +1706,7 @@ fn h264_factory(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSetti
         BitrateMode::Cbr => filmcraft_h264enc::RateControl::Cbr { kbps },
         // the encoder clamps to 0..=51; a NaN from a hand-edited preset becomes the default
         BitrateMode::Crf => filmcraft_h264enc::RateControl::Crf(if s.crf.is_finite() { s.crf } else { DEFAULT_CRF }),
+        BitrateMode::Cqp => filmcraft_h264enc::RateControl::Qp(s.cqp.min(51)),
         _ => filmcraft_h264enc::RateControl::Vbr { target_kbps: kbps, max_kbps: max },
     };
     cfg.pass = match &s.h264_pass {

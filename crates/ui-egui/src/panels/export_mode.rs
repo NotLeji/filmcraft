@@ -726,10 +726,16 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
                 });
             }
             row(ui, t, tl!("Bitrate Encoding"), |ui| {
-                // a hardware encoder has one pass and no constant-quality mode: H.265 offers neither
-                let o = [BitrateMode::Cbr, BitrateMode::Vbr1Pass, BitrateMode::Vbr2Pass, BitrateMode::Crf];
-                let labels: Vec<(String, bool)> =
-                    o.iter().map(|m| (m.label().to_string(), !(hevc && matches!(m, BitrateMode::Vbr2Pass | BitrateMode::Crf)))).collect();
+                // the native hardware encoders have one pass and no CRF: H.265 offers neither, but
+                // the external-ffmpeg encoder brings CQP (constant quantizer) to H.264 and H.265
+                let o = [BitrateMode::Cbr, BitrateMode::Vbr1Pass, BitrateMode::Vbr2Pass, BitrateMode::Crf, BitrateMode::Cqp];
+                let labels: Vec<(String, bool)> = o
+                    .iter()
+                    .map(|m| {
+                        let on = !(hevc && matches!(m, BitrateMode::Vbr2Pass | BitrateMode::Crf)) && !(f == Format::Av1 && *m == BitrateMode::Cqp);
+                        (m.label().to_string(), on)
+                    })
+                    .collect();
                 if let Some(i) = combo(ui, reg, "export.video.bitrateMode", s.bitrate_mode.label(), &labels, 140.0) {
                     s.bitrate_mode = o[i];
                 }
@@ -739,6 +745,13 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
                     let mut crf = if s.crf.is_finite() { f64::from(s.crf) } else { f64::from(filmcraft_engine::export::DEFAULT_CRF) };
                     if drag(ui, reg, "export.video.crf", &mut crf, 0.0..=51.0, 0.1, "", 0) {
                         s.crf = crf.round() as f32;
+                    }
+                });
+            } else if s.bitrate_mode == BitrateMode::Cqp {
+                row(ui, t, tl!("Quality (CQP)"), |ui| {
+                    let mut cqp = f64::from(s.cqp);
+                    if drag(ui, reg, "export.video.cqp", &mut cqp, 0.0..=51.0, 1.0, "", 0) {
+                        s.cqp = cqp.round().clamp(0.0, 51.0) as u8;
                     }
                 });
             } else if let Some(bpp) = s.adaptive_bitrate {

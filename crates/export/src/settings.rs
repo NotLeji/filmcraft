@@ -91,7 +91,7 @@ pub enum GpuRendering {
     Off,
 }
 
-/// Bitrate encoding of bitrate-driven codecs (H.264).
+/// Bitrate encoding of bitrate-driven codecs (H.264, H.265).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum BitrateMode {
@@ -105,6 +105,10 @@ pub enum BitrateMode {
     /// Constant quality: every frame is coded at [`ExportSettings::crf`] and the bitrate follows the
     /// picture (H.264, built-in encoder only).
     Crf,
+    /// Constant quantizer: every block is coded at [`ExportSettings::cqp`] (0–51) and the bitrate
+    /// follows the picture. The native quality mode of hardware encoders; taken by the
+    /// external-ffmpeg encoder and the built-in H.264 encoder.
+    Cqp,
 }
 
 impl BitrateMode {
@@ -114,6 +118,7 @@ impl BitrateMode {
             BitrateMode::Vbr1Pass => "VBR, 1 pass",
             BitrateMode::Vbr2Pass => "VBR, 2 pass",
             BitrateMode::Crf => "CRF (constant quality)",
+            BitrateMode::Cqp => "CQP (constant quantizer)",
         }
     }
 }

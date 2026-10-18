@@ -1,0 +1,72 @@
+# CI for this fork's ffmpeg-encoder branch. Self-contained on purpose: the upstream
+# workflows delegate to storytold/craft-common-actions, which is org infrastructure and not
+# usable from a fork. Runs the quality gates, then builds the Linux x86_64 release binary
+# (with the external-ffmpeg encoder) as a downloadable artifact.
+name: Build (ffmpeg-encoder)
+
+on:
+  push:
+    branches: [lezy/ffmpeg-encoder]
+  pull_request:
+    branches: [lezy/ffmpeg-encoder]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ffmpeg-encoder-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gates:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ffmpeg (the encoder integration tests use the real binary)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: fmt
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: dependency layers
+        run: cargo xtask layers
+      - name: test
+        run: cargo test --workspace
+
+  build:
+    name: linux x86_64 release binary
+    runs-on: ubuntu-latest
+    needs: gates
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libx11-dev libxi-dev \
+            libgl1-mesa-dev ffmpeg
+      - name: build
+        run: cargo build --release -p filmcraft
+      - uses: actions/upload-artifact@v4
+        with:
+          name: filmcraft-linux-x86_64-ffmpeg
+          path: target/release/filmcraft
+          if-no-files-found: error

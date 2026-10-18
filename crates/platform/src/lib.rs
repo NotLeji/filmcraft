@@ -9,7 +9,10 @@
 //! hardware H.264 encoder factory (`filmcraft_export::register_encoder`) that only acts when an
 //! export asks for it (`ExportSettings::hardware_encoding` = `Auto`), see [`hardware_encode`]; on
 //! macOS and on Windows (NVENC, [`nvenc`]) it also makes the H.265 export format available, and on Windows
-//! (Main 10) lets HDR sequences export as HDR H.265.
+//! (Main 10) lets HDR sequences export as HDR H.265. This fork additionally registers the
+//! external-ffmpeg encoder ([`ffmpeg`]) behind the native hardware encoders: H.264 / H.265
+//! (QSV, NVENC, VA-API, AMF, VideoToolbox, else `libx264` / `libx265`) through the ffmpeg
+//! binary on the system, with a CQP (constant quantizer) rate mode.
 //!
 //! Hardware decoding never makes a file undecodable:
 //!
@@ -35,6 +38,10 @@ mod annexb;
 #[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
 mod biplanar;
 pub mod cursor;
+/// H.264 / H.265 export through an external `ffmpeg` binary (this fork's branch only; never
+/// merge into `main`: upstream rejects any ffmpeg dependency).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod ffmpeg;
 #[cfg(target_os = "macos")]
 pub mod hardware_encode;
 pub mod hybrid;
@@ -68,6 +75,18 @@ pub enum Availability {
 /// harmless). Streams they do not take, and every stream while hardware decoding is Off, keep
 /// using FilmCraft's own decoders.
 pub fn register() -> Availability {
+    // The external-ffmpeg encoder (this fork's branch only): registered before the native
+    // hardware encoders so those stay preferred where they exist (`register_encoder` tries
+    // the last registered first). A missing ffmpeg binary simply declines.
+    #[cfg(not(target_arch = "wasm32"))]
+    filmcraft_export::register_encoder(ffmpeg::export::factory);
+    // H.265 through ffmpeg where the native encoders cannot do it (and as a fallback where
+    // they can): the probe is cached and warmed off the UI thread, like the native ones.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        filmcraft_export::register_format_probe(filmcraft_export::Format::Hevc, ffmpeg::export::hevc_available);
+        ffmpeg::export::warm_hevc_probe();
+    }
     #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
     filmcraft_export::register_encoder(nvenc::export::factory);
     #[cfg(target_os = "macos")]
