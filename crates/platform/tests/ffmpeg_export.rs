@@ -52,7 +52,7 @@ fn h264_cqp_roundtrip_through_libx264() {
         return;
     }
     let packets = roundtrip(Format::H264, "libx264", 6);
-    assert!(packets.len() >= 6, "every frame produced a packet, got {}", packets.len());
+    assert!(packets.len() >= 6, "every frame produced a packet, got {n}", n = packets.len());
     assert!(packets.iter().any(|p| p.key), "at least one keyframe");
     assert!(packets.iter().all(|p| p.duration == 1), "one frame per packet at 24 fps");
     assert!(packets.iter().all(|p| p.composition_offset >= 0), "sane composition offsets");
@@ -66,7 +66,7 @@ fn hevc_cqp_roundtrip_through_libx265() {
         return;
     }
     let packets = roundtrip(Format::Hevc, "libx265", 4);
-    assert!(packets.len() >= 4, "every frame produced a packet, got {}", packets.len());
+    assert!(packets.len() >= 4, "every frame produced a packet, got {n}", n = packets.len());
     assert!(packets.iter().any(|p| p.key), "at least one keyframe");
 }
 

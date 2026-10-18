@@ -101,7 +101,7 @@ impl<R: Read> FragReader<R> {
             header_len = 16;
         }
         if size < header_len {
-            return Err(ExportError::Encode(format!("ffmpeg: box {} smaller than its header", typ_str(&typ))));
+            return Err(ExportError::Encode(format!("ffmpeg: box {t} smaller than its header", t = typ_str(&typ))));
         }
         Ok(Some(BoxHeader { typ, size, header_len, start }))
     }
@@ -111,7 +111,7 @@ impl<R: Read> FragReader<R> {
     }
 
     fn skip_box(&mut self, h: &BoxHeader, cap: u64) -> Result<()> {
-        self.read_box_payload(h, cap, &format!("{} payload", typ_str(&h.typ))).map(|_| ())
+        self.read_box_payload(h, cap, &format!("{t} payload", t = typ_str(&h.typ))).map(|_| ())
     }
 
     /// Read boxes until the init segment (`moov`) is parsed: the sample entry, the codec, and
@@ -148,7 +148,7 @@ impl<R: Read> FragReader<R> {
                 return Err(ExportError::Encode("ffmpeg: end of stream between moof and mdat".into()));
             };
             if &mdat.typ != b"mdat" {
-                return Err(ExportError::Encode(format!("ffmpeg: expected mdat after moof, found {}", typ_str(&mdat.typ))));
+                return Err(ExportError::Encode(format!("ffmpeg: expected mdat after moof, found {t}", t = typ_str(&mdat.typ))));
             }
             let mdat_payload_start = mdat.start + mdat.header_len;
             let mdat_payload = self.read_box_payload(&mdat, MAX_MDAT, "mdat")?;
@@ -223,7 +223,7 @@ impl<'a> Cur<'a> {
                 size = self.u64()?;
             }
             if size < 8 {
-                return Err(ExportError::Encode(format!("ffmpeg: child box {} smaller than its header", typ_str(&typ))));
+                return Err(ExportError::Encode(format!("ffmpeg: child box {t} smaller than its header", t = typ_str(&typ))));
             }
             let payload = self.bytes((size - 8) as usize)?;
             out.push((typ, payload));
@@ -312,7 +312,7 @@ fn parse_trak(trak: &[u8], w: u16, h: u16, timescale: u32) -> Result<Option<Init
             let cfg = HevcConfig::parse(hvcc).map_err(|e| ExportError::Encode(format!("ffmpeg: unreadable hvcC: {e:?}")))?;
             (SampleEntry::hevc(cfg, w, h), true)
         }
-        _ => return Err(ExportError::Encode(format!("ffmpeg: unexpected sample entry {}", typ_str(entry_typ)))),
+        _ => return Err(ExportError::Encode(format!("ffmpeg: unexpected sample entry {t}", t = typ_str(entry_typ)))),
     };
     Ok(Some(InitInfo { entry, hevc }))
 }

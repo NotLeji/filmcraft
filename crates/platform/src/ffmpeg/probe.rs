@@ -42,13 +42,6 @@ const HEVC_CANDIDATES: &[&str] = &["hevc_qsv", "hevc_vaapi", "hevc_nvenc", "libx
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 const HEVC_CANDIDATES: &[&str] = &["libx265"];
 
-fn candidates(codec: Codec) -> &'static [&'static str] {
-    match codec {
-        Codec::H264 => H264_CANDIDATES,
-        Codec::Hevc => HEVC_CANDIDATES,
-    }
-}
-
 /// Whether `bin` starts and reports its version (a cheap liveness check, not a version gate).
 fn runs(bin: &Path) -> bool {
     Command::new(bin).arg("-hide_banner").arg("-version").output().map(|o| o.status.success()).unwrap_or(false)
@@ -122,7 +115,7 @@ pub fn select_encoder(codec: Codec) -> Option<&'static str> {
         let pick = cands.iter().find(|name| encoder_runs(bin.as_path(), name)).copied();
         match pick {
             Some(name) => log::info!("ffmpeg encoder for {codec:?}: {name}"),
-            None => log::info!("no ffmpeg encoder for {codec:?} in {}", bin.display()),
+            None => log::info!("no ffmpeg encoder for {codec:?} in {bin}", bin = bin.display()),
         }
         pick
     })

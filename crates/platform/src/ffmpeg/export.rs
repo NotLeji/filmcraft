@@ -210,9 +210,9 @@ fn argv(cfg: &FfmpegConfig) -> std::result::Result<Vec<String>, String> {
         "-pix_fmt".to_string(),
         "yuv420p".to_string(),
         "-s".to_string(),
-        format!("{}x{}", cfg.width, cfg.height),
+        format!("{width}x{height}", width = cfg.width, height = cfg.height),
         "-framerate".to_string(),
-        format!("{}/{}", cfg.fps_num, cfg.fps_den),
+        format!("{num}/{den}", num = cfg.fps_num, den = cfg.fps_den),
         "-i".to_string(),
         "pipe:0".to_string(),
         "-an".to_string(),
@@ -255,7 +255,7 @@ fn tail_msg(tail: &str) -> String {
 /// Spawn ffmpeg for `cfg` and wait for its init segment (which arrives before any frame is
 /// needed). A wedged child becomes a clear error, never a hang.
 fn open(cfg: &FfmpegConfig) -> std::result::Result<FfmpegEncoder, String> {
-    let bin = probe::ffmpeg_binary().ok_or_else(|| format!("no ffmpeg binary ({} or PATH)", probe::ENV_BINARY))?;
+    let bin = probe::ffmpeg_binary().ok_or_else(|| format!("no ffmpeg binary ({var} or PATH)", var = probe::ENV_BINARY))?;
     let args = argv(cfg)?;
     let mut child = std::process::Command::new(&bin)
         .args(&args)
@@ -263,7 +263,7 @@ fn open(cfg: &FfmpegConfig) -> std::result::Result<FfmpegEncoder, String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("cannot run {}: {e}", bin.display()))?;
+        .map_err(|e| format!("cannot run {bin}: {e}", bin = bin.display()))?;
     let stdin = child.stdin.take().ok_or_else(|| "ffmpeg: no stdin".to_string())?;
     let stdout = child.stdout.take().ok_or_else(|| "ffmpeg: no stdout".to_string())?;
     let stderr = child.stderr.take().ok_or_else(|| "ffmpeg: no stderr".to_string())?;
@@ -426,7 +426,7 @@ impl FfmpegEncoder {
                 }
                 WorkerMsg::Error(e) => {
                     let tail = self.shutdown();
-                    return Err(ExportError::Encode(format!("ffmpeg: {e}{}", tail_msg(&tail))));
+                    return Err(ExportError::Encode(format!("ffmpeg: {e}{tail}", tail = tail_msg(&tail))));
                 }
                 WorkerMsg::Done => self.saw_done = true,
             }
@@ -463,7 +463,13 @@ impl VideoEncoder for FfmpegEncoder {
             return Err(ExportError::Encode("ffmpeg: the encoder ended before all frames were written".into()));
         }
         if f.width != self.w || f.height != self.h {
-            return Err(ExportError::Encode(format!("ffmpeg: a {}x{} picture for a {}x{} encoder", f.width, f.height, self.w, self.h)));
+            return Err(ExportError::Encode(format!(
+                "ffmpeg: a {fw}x{fh} picture for a {sw}x{sh} encoder",
+                fw = f.width,
+                fh = f.height,
+                sw = self.w,
+                sh = self.h
+            )));
         }
         if f.hdr.is_some() {
             return Err(ExportError::Unsupported("ffmpeg: HDR pictures are not supported (8-bit SDR only)".into()));
@@ -481,7 +487,7 @@ impl VideoEncoder for FfmpegEncoder {
         };
         if let Err(e) = write_result {
             let tail = self.shutdown();
-            return Err(ExportError::Encode(format!("ffmpeg: lost while writing a frame: {e}{}", tail_msg(&tail))));
+            return Err(ExportError::Encode(format!("ffmpeg: lost while writing a frame: {e}{tail}", tail = tail_msg(&tail))));
         }
         if self.hw {
             filmcraft_export::note_hw_encode_frame();
@@ -507,7 +513,7 @@ impl VideoEncoder for FfmpegEncoder {
                 }
                 Ok(WorkerMsg::Error(e)) => {
                     let tail = self.shutdown();
-                    return Err(ExportError::Encode(format!("ffmpeg: {e}{}", tail_msg(&tail))));
+                    return Err(ExportError::Encode(format!("ffmpeg: {e}{tail}", tail = tail_msg(&tail))));
                 }
                 Ok(WorkerMsg::Done) | Err(_) => break,
             }
@@ -516,7 +522,7 @@ impl VideoEncoder for FfmpegEncoder {
         self.dead = true;
         let tail = self.err_rx.recv().unwrap_or_default();
         if !status.success() {
-            return Err(ExportError::Encode(format!("ffmpeg: exited with {status}{}", tail_msg(&tail))));
+            return Err(ExportError::Encode(format!("ffmpeg: exited with {status}{tail}", tail = tail_msg(&tail))));
         }
         Ok(out)
     }
