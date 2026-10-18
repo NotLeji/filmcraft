@@ -28,6 +28,14 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      # The debug test binaries (esp. filmcraft-ui-egui) are huge; the default
+      # runner disk fills up while linking them (run 9: "No space left on
+      # device"). Free ~14GB of preinstalled tooling we don't need.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          sudo docker system prune -af 2>/dev/null || true
+          df -h /
       - uses: dtolnay/rust-toolchain@stable
         with:
           # NOTE (lezy/ffmpeg-encoder branch only): stable instead of the repo's
@@ -57,6 +65,12 @@ jobs:
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
+      # Release link of the full app is also disk-hungry; same cleanup as gates.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          sudo docker system prune -af 2>/dev/null || true
+          df -h /
       - uses: dtolnay/rust-toolchain@stable
         with:
           # Same reason as above: stable, not 1.95 (see fmt/clippy job).
