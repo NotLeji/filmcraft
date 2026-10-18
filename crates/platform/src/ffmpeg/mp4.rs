@@ -290,9 +290,11 @@ fn parse_trak(trak: &[u8], w: u16, h: u16, timescale: u32) -> Result<Option<Init
     }
     let Some(minf) = Cur::child(&mdia_boxes, b"minf") else { return Ok(None) };
     let mut minf = Cur::new(minf);
-    let Some(stbl) = Cur::child(&minf.children()?, b"stbl") else { return Ok(None) };
+    let minf_children = minf.children()?;
+    let Some(stbl) = Cur::child(&minf_children, b"stbl") else { return Ok(None) };
     let mut stbl = Cur::new(stbl);
-    let Some(stsd) = Cur::child(&stbl.children()?, b"stsd") else { return Ok(None) };
+    let stbl_children = stbl.children()?;
+    let Some(stsd) = Cur::child(&stbl_children, b"stsd") else { return Ok(None) };
     let mut stsd = Cur::new(stsd);
     stsd.skip(8)?; // version + flags + entry_count
     let entry_boxes = stsd.children()?;
@@ -601,7 +603,7 @@ mod tests {
     #[test]
     fn truncated_streams_are_errors_not_panics() {
         let ftyp = bx(b"ftyp", b"isom");
-        let (moof, _) = fragment();
+        let (moof, _, _) = fragment();
         let mut stream = Vec::new();
         stream.extend_from_slice(&ftyp);
         stream.extend_from_slice(&moov(30));

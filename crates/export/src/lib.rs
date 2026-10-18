@@ -577,6 +577,7 @@ impl Default for ExportSettings {
             h264_level: None,
             bitrate_mode: BitrateMode::default(),
             crf: DEFAULT_CRF,
+            cqp: DEFAULT_CQP,
             hardware_encoding: HardwareEncoding::default(),
             gpu_rendering: GpuRendering::Off,
             max_bitrate_kbps: None,

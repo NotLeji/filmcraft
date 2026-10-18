@@ -50,7 +50,6 @@ enum RateControl {
 /// The encoder's resolved configuration, or why the export is not taken.
 struct FfmpegConfig {
     encoder: String,
-    hevc: bool,
     width: u32,
     height: u32,
     fps_num: u32,
@@ -114,7 +113,7 @@ fn config(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSettings, e
         rate_args(encoder, &rate, &mut Vec::new()).map_err(|why| format!("{encoder}: {why}"))?;
     }
     let keyint = s.keyframe_distance.filter(|k| *k > 0).unwrap_or_else(|| (f64::from(fps_num) / f64::from(fps_den) * 2.0).round().max(1.0) as u32);
-    Ok(FfmpegConfig { encoder: encoder.to_string(), hevc, width: w, height: h, fps_num, fps_den, rate, keyint, hw: probe::is_hardware_encoder(encoder) })
+    Ok(FfmpegConfig { encoder: encoder.to_string(), width: w, height: h, fps_num, fps_den, rate, keyint, hw: probe::is_hardware_encoder(encoder) })
 }
 
 /// The ffmpeg arguments for one rate-control mode on one encoder family. Hardware encoders
@@ -240,7 +239,7 @@ fn argv(cfg: &FfmpegConfig) -> std::result::Result<Vec<String>, String> {
 
 /// Messages from the stdout reader thread to the encoder.
 enum WorkerMsg {
-    Init(SampleEntry),
+    Init(Box<SampleEntry>),
     Packets { packets: Vec<EncodedPacket>, first_cto: Option<i64> },
     Error(String),
     Done,
@@ -305,7 +304,7 @@ fn open(cfg: &FfmpegConfig) -> std::result::Result<FfmpegEncoder, String> {
             let mut reader = FragReader::new(stdout);
             match reader.read_init(w16, h16, timescale) {
                 Ok(init) => {
-                    if tx.send(WorkerMsg::Init(init.entry)).is_err() {
+                    if tx.send(WorkerMsg::Init(Box::new(init.entry))).is_err() {
                         return;
                     }
                 }
@@ -336,7 +335,7 @@ fn open(cfg: &FfmpegConfig) -> std::result::Result<FfmpegEncoder, String> {
         .map_err(|e| format!("cannot spawn the ffmpeg reader thread: {e}"))?;
 
     let entry = match rx.recv_timeout(INIT_TIMEOUT) {
-        Ok(WorkerMsg::Init(entry)) => entry,
+        Ok(WorkerMsg::Init(entry)) => *entry,
         Ok(WorkerMsg::Error(e)) => {
             kill(&mut child);
             return Err(e);
@@ -403,10 +402,10 @@ impl FfmpegEncoder {
         kill(&mut self.child);
         // drain anything already sent (ignored: the export already failed)
         for msg in self.rx.try_iter() {
-            if let WorkerMsg::Packets { first_cto, .. } = msg {
-                if self.media_start.is_none() {
-                    self.media_start = first_cto.filter(|c| *c > 0);
-                }
+            if let WorkerMsg::Packets { first_cto, .. } = msg
+                && self.media_start.is_none()
+            {
+                self.media_start = first_cto.filter(|c| *c > 0);
             }
         }
         self.err_rx.try_recv().unwrap_or_default()
@@ -664,7 +663,7 @@ mod tests {
         let c = cfg_for(Format::Hevc, BitrateMode::Cbr, "libx265").unwrap();
         assert_eq!(c.rate, RateControl::Cbr { kbps: 4000, max_kbps: 6000 });
         assert!(!c.hw);
-        assert!(c.hevc);
+        assert_eq!(c.encoder, "libx265");
         // the quantizer is clamped into the 0..=51 range the encoders take
         let mut s = settings(BitrateMode::Cqp);
         s.cqp = 200;
@@ -712,7 +711,10 @@ mod tests {
         // H.264: the software encoder takes it
         assert!(err(Format::H264).is_none());
         // HEVC: nothing else can take it, so the export fails naming ffmpeg
-        let e = err(Format::Hevc).unwrap().unwrap_err();
+        let e = match err(Format::Hevc) {
+            Some(Err(e)) => e,
+            _ => panic!("expected the HEVC export to fail"),
+        };
         assert!(e.to_string().contains("ffmpeg"), "{e}");
     }
 }

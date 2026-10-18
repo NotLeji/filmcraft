@@ -3,7 +3,7 @@
 //! the machine has). Skipped gracefully when no suitable ffmpeg runs here; the argument
 //! building, the fragmented-MP4 parser and the decline logic are covered by unit tests.
 
-use filmcraft_export::{BitrateMode, EncodedPacket, EncoderFrame, ExportSettings, Format, HardwareEncoding, VideoEncoder};
+use filmcraft_export::{BitrateMode, EncodedPacket, EncoderFrame, ExportSettings, Format, HardwareEncoding};
 use filmcraft_platform::ffmpeg;
 use filmcraft_time::FrameRate;
 
@@ -24,11 +24,7 @@ fn test_frame(w: u32, h: u32, i: u64) -> Vec<u8> {
 }
 
 fn roundtrip(format: Format, encoder: &str, frames: u64) -> Vec<EncodedPacket> {
-    let mut s = ExportSettings::default();
-    s.format = format;
-    s.hardware_encoding = HardwareEncoding::Auto;
-    s.bitrate_mode = BitrateMode::Cqp;
-    s.cqp = 30;
+    let s = ExportSettings { format, hardware_encoding: HardwareEncoding::Auto, bitrate_mode: BitrateMode::Cqp, cqp: 30, ..Default::default() };
     let mut enc = ffmpeg::export::factory_with_encoder(format, 64, 64, FrameRate::FPS_24, &s, Some(encoder))
         .expect("the ffmpeg factory takes the export")
         .expect("the encoder opens");
@@ -72,13 +68,11 @@ fn hevc_cqp_roundtrip_through_libx265() {
 
 #[test]
 fn declines_without_an_encoder_or_with_hardware_off() {
-    let mut s = ExportSettings::default();
-    s.format = Format::H264;
-    s.hardware_encoding = HardwareEncoding::Auto;
+    let s = ExportSettings { format: Format::H264, hardware_encoding: HardwareEncoding::Auto, ..Default::default() };
     // no encoder picked (no ffmpeg): declines without touching the machine
     assert!(ffmpeg::export::factory_with_encoder(Format::H264, 64, 64, FrameRate::FPS_24, &s, None).is_none());
     assert!(ffmpeg::export::factory_with_encoder(Format::Hevc, 64, 64, FrameRate::FPS_24, &s, None).is_none());
     // hardware encoding off: the built-in encoder's turn
-    s.hardware_encoding = HardwareEncoding::Off;
+    let s = ExportSettings { hardware_encoding: HardwareEncoding::Off, ..s };
     assert!(ffmpeg::export::factory_with_encoder(Format::H264, 64, 64, FrameRate::FPS_24, &s, Some("libx264")).is_none());
 }
