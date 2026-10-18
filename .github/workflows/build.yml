@@ -40,7 +40,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Install ffmpeg (the encoder integration tests use the real binary)
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg libasound2-dev
       - name: fmt
         run: cargo fmt --check
       - name: clippy
@@ -69,7 +69,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libxkbcommon-dev libxkbcommon-x11-dev \
             libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libx11-dev libxi-dev \
-            libgl1-mesa-dev ffmpeg
+            libgl1-mesa-dev libasound2-dev ffmpeg
       - name: build
         run: cargo build --release -p filmcraft
       - uses: actions/upload-artifact@v4
