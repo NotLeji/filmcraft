@@ -30,7 +30,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.95"
+          # NOTE (lezy/ffmpeg-encoder branch only): stable instead of the repo's
+          # MSRV 1.95. Clippy 1.95 and rustfmt 1.95 disagree with 1.99 (the
+          # toolchain this branch is developed/verified against) on several
+          # lints and formatting rules (collapsible_match, nonminimal_bool,
+          # struct-literal collapsing), causing unfixable whack-a-mole CI
+          # failures. The code itself uses no post-1.95 language features.
+          toolchain: "stable"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Install ffmpeg (the encoder integration tests use the real binary)
@@ -53,7 +59,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.95"
+          # Same reason as above: stable, not 1.95 (see fmt/clippy job).
+          toolchain: "stable"
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release
