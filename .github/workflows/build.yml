@@ -85,9 +85,14 @@ jobs:
             libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libx11-dev libxi-dev \
             libgl1-mesa-dev libasound2-dev ffmpeg
       - name: build
-        run: cargo build --release -p filmcraft
+        run: cargo build --release -p filmcraft -p filmcraft-cli
+      - name: AppImage
+        # The repo's own packager (needs both binaries above); downloads
+        # appimagetool automatically. The AppImage does NOT bundle ffmpeg —
+        # the encoder uses the user's own ffmpeg binary found on $PATH.
+        run: packaging/linux/package.sh --skip-build --formats appimage
       - uses: actions/upload-artifact@v4
         with:
           name: filmcraft-linux-x86_64-ffmpeg
-          path: target/release/filmcraft
+          path: dist/release/*.AppImage
           if-no-files-found: error
