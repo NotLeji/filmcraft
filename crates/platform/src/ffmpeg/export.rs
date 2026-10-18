@@ -2,9 +2,11 @@
 //! hardware encoders and in front of the built-in software ones
 //! (`filmcraft_export::register_encoder`).
 //!
-//! - H.264: takes an export only when Export ▸ Hardware encoding is Auto and the native
-//!   encoder declined it (or there is none); otherwise it returns `None` and the next encoder
-//!   runs, exactly as before.
+//! - H.264: takes an export only when Export ▸ Hardware encoding is Auto, the native
+//!   encoder declined it (or there is none), *and* ffmpeg offers a hardware encoder
+//!   (QSV/VAAPI/NVENC/AMF/VideoToolbox). When ffmpeg would only use its software encoder
+//!   (libx264) the factory returns `None` and the built-in software encoder runs,
+//!   exactly as before — no behavior change on machines without HW acceleration.
 //! - H.265 (`Format::Hevc`): there is no software encoder, so the Hardware encoding toggle
 //!   does not apply and choosing the format is the opt-in. What ffmpeg cannot do (interlaced,
 //!   two-pass, non-square pixels, sizes outside the MP4 sample entry, ...) ends the export
@@ -533,7 +535,22 @@ impl VideoEncoder for FfmpegEncoder {
 
 /// The Export encoder factory (see the module documentation).
 pub fn factory(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSettings) -> Option<Result<Box<dyn VideoEncoder>>> {
-    factory_with(format, w, h, rate, s, select_encoder_for(format), open)
+    let encoder = select_encoder_for(format);
+    // The ffmpeg H.264 path exists for hardware acceleration. When ffmpeg would only use
+    // its software encoder (libx264), decline and let the built-in software encoder handle
+    // it: there is no speed or quality win in shelling out to libx264, and the built-in's
+    // output is what the export workflow tests expect. (HEVC has no built-in encoder, so
+    // ffmpeg is always the path there, hardware or software.)
+    if format != Format::Hevc {
+        if let Some(name) = encoder {
+            if !probe::is_hardware_encoder(name) {
+                log::info!("ffmpeg encoding declined: H.264 would be software-only ({name})");
+                filmcraft_export::note_hw_encode_declined();
+                return None;
+            }
+        }
+    }
+    factory_with(format, w, h, rate, s, encoder, open)
 }
 
 /// [`factory`] with the encoder picked by the caller (tests, debugging): `None` declines
