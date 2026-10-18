@@ -541,7 +541,10 @@ pub fn factory(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSettin
     // it: there is no speed or quality win in shelling out to libx264, and the built-in's
     // output is what the export workflow tests expect. (HEVC has no built-in encoder, so
     // ffmpeg is always the path there, hardware or software.)
-    if format != Format::Hevc && let Some(name) = encoder && !probe::is_hardware_encoder(name) {
+    if format != Format::Hevc
+        && let Some(name) = encoder
+        && !probe::is_hardware_encoder(name)
+    {
         log::info!("ffmpeg encoding declined: H.264 would be software-only ({name})");
         filmcraft_export::note_hw_encode_declined();
         return None;
