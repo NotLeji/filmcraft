@@ -27,18 +27,21 @@
 use std::io::{BufReader, Read as _, Write as _};
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{Receiver, channel};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use filmcraft_export::{
     BitrateMode, EncodedPacket, EncoderFrame, ExportError, ExportSettings, FieldOrder, Format, H264Pass, HardwareEncoding, Result, VideoEncoder,
 };
-use filmcraft_isobmff::SampleEntry;
+use filmcraft_isobmff::{AvcConfig, HevcConfig, SampleEntry};
 use filmcraft_time::FrameRate;
 
 use super::mp4::FragReader;
 use super::probe::{self, Codec};
 
-/// How long [`open`] waits for ffmpeg's init segment before giving up on a wedged child.
+/// How long `sample_entry` waits for ffmpeg's init segment before giving up on a wedged
+/// child. ffmpeg writes the segment only once it has input frames, so the wait happens
+/// there — after the pipeline has started encoding — never at spawn time.
 const INIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Rate control, resolved from [`ExportSettings`].
@@ -60,6 +63,8 @@ struct FfmpegConfig {
     keyint: u32,
     /// Whether the picked encoder is hardware (what the export hardware-encoder counters count).
     hw: bool,
+    /// Whether this is an HEVC export (the placeholder entry differs per codec).
+    hevc: bool,
 }
 
 /// Why ffmpeg does not take this export (the next encoder does, for H.264), or the encoder's
@@ -115,7 +120,7 @@ fn config(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSettings, e
         rate_args(encoder, &rate, &mut Vec::new()).map_err(|why| format!("{encoder}: {why}"))?;
     }
     let keyint = s.keyframe_distance.filter(|k| *k > 0).unwrap_or_else(|| (f64::from(fps_num) / f64::from(fps_den) * 2.0).round().max(1.0) as u32);
-    Ok(FfmpegConfig { encoder: encoder.to_string(), width: w, height: h, fps_num, fps_den, rate, keyint, hw: probe::is_hardware_encoder(encoder) })
+    Ok(FfmpegConfig { encoder: encoder.to_string(), width: w, height: h, fps_num, fps_den, rate, keyint, hw: probe::is_hardware_encoder(encoder), hevc })
 }
 
 /// The ffmpeg arguments for one rate-control mode on one encoder family. Hardware encoders
@@ -264,8 +269,8 @@ fn tail_msg(tail: &str) -> String {
     if tail.is_empty() { String::new() } else { format!(" ({tail})") }
 }
 
-/// Spawn ffmpeg for `cfg` and wait for its init segment (which arrives before any frame is
-/// needed). A wedged child becomes a clear error, never a hang.
+/// Spawn ffmpeg for `cfg`. The init segment is NOT waited for here: ffmpeg writes it only
+/// once it has input frames, so it is collected later (see `sample_entry`).
 fn open(cfg: &FfmpegConfig) -> std::result::Result<FfmpegEncoder, String> {
     let bin = probe::ffmpeg_binary().ok_or_else(|| format!("no ffmpeg binary ({var} or PATH)", var = probe::ENV_BINARY))?;
     let args = argv(cfg)?;
@@ -347,21 +352,6 @@ fn open(cfg: &FfmpegConfig) -> std::result::Result<FfmpegEncoder, String> {
         })
         .map_err(|e| format!("cannot spawn the ffmpeg reader thread: {e}"))?;
 
-    let entry = match rx.recv_timeout(INIT_TIMEOUT) {
-        Ok(WorkerMsg::Init(entry)) => *entry,
-        Ok(WorkerMsg::Error(e)) => {
-            kill(&mut child);
-            return Err(e);
-        }
-        Ok(_) => {
-            kill(&mut child);
-            return Err("ffmpeg: unexpected reader message".into());
-        }
-        Err(_) => {
-            kill(&mut child);
-            return Err("ffmpeg: timed out waiting for the MP4 init segment".into());
-        }
-    };
     Ok(FfmpegEncoder {
         child,
         stdin: Some(stdin),
@@ -373,9 +363,13 @@ fn open(cfg: &FfmpegConfig) -> std::result::Result<FfmpegEncoder, String> {
         w: cfg.width,
         h: cfg.height,
         timescale: cfg.fps_num,
-        sample_entry: entry,
+        entry: Mutex::new(None),
+        stash: Mutex::new(Vec::new()),
+        stash_cto: Mutex::new(None),
+        deferred: Mutex::new(None),
         media_start: None,
         hw: cfg.hw,
+        hevc: cfg.hevc,
         dead: false,
         saw_done: false,
     })
@@ -398,10 +392,22 @@ pub struct FfmpegEncoder {
     w: u32,
     h: u32,
     timescale: u32,
-    sample_entry: SampleEntry,
+    /// The sample entry from ffmpeg's init segment, once the reader thread delivered it.
+    /// Behind a mutex because `sample_entry(&self)` may have to collect it.
+    entry: Mutex<Option<SampleEntry>>,
+    /// Packets `sample_entry` collected while waiting for the init segment; they precede
+    /// anything still in the channel, so they are drained before it.
+    stash: Mutex<Vec<EncodedPacket>>,
+    /// The composition offset that arrived with the first stashed packet batch.
+    stash_cto: Mutex<Option<i64>>,
+    /// A failure `sample_entry` collected (its signature cannot return one); the next
+    /// `encode`/`flush` reports it.
+    deferred: Mutex<Option<String>>,
     /// Edit-list offset (B-frame delay), once the first fragment's timing is known.
     media_start: Option<i64>,
     hw: bool,
+    /// Whether this is an HEVC export (the placeholder entry differs per codec).
+    hevc: bool,
     /// The child is gone (failed or finished early): further calls are errors, not hangs.
     dead: bool,
     /// The reader reported EOF before `flush`: the child ended mid-export.
@@ -424,12 +430,70 @@ impl FfmpegEncoder {
         self.err_rx.try_recv().unwrap_or_default()
     }
 
+    /// Move packets that `sample_entry` collected while waiting for the init segment into
+    /// `out`. They precede anything still in the channel, so they go first.
+    fn take_stash(&mut self, out: &mut Vec<EncodedPacket>) {
+        let mut stash = self.stash.lock().unwrap_or_else(|p| p.into_inner());
+        if stash.is_empty() {
+            return;
+        }
+        if self.media_start.is_none() {
+            let cto = self.stash_cto.lock().unwrap_or_else(|p| p.into_inner());
+            self.media_start = cto.filter(|c| *c > 0);
+        }
+        out.extend(stash.drain(..));
+    }
+
+    /// A failure `sample_entry` collected (its signature cannot return one), turned into
+    /// the error the next `encode`/`flush` reports, with ffmpeg's last words attached.
+    fn take_deferred_error(&mut self) -> Option<ExportError> {
+        let e = self.deferred.lock().unwrap_or_else(|p| p.into_inner()).clone()?;
+        let tail = self.shutdown();
+        Some(ExportError::Encode(format!("ffmpeg: {e}{tail}", tail = tail_msg(&tail))))
+    }
+
+    /// A stand-in sample entry for an export that has already failed (see `deferred`):
+    /// the muxer is configured with it, then `encode`/`flush` reports the real error.
+    fn placeholder_entry(&self) -> SampleEntry {
+        let (w, h) = (self.w as u16, self.h as u16);
+        if self.hevc {
+            SampleEntry::hevc(
+                HevcConfig {
+                    general_profile_space: 0,
+                    general_tier_flag: false,
+                    general_profile_idc: 0,
+                    general_profile_compatibility_flags: 0,
+                    general_constraint_indicator_flags: 0,
+                    general_level_idc: 0,
+                    min_spatial_segmentation_idc: 0,
+                    parallelism_type: 0,
+                    chroma_format_idc: 1,
+                    bit_depth_luma: 8,
+                    bit_depth_chroma: 8,
+                    avg_frame_rate: 0,
+                    constant_frame_rate: 0,
+                    num_temporal_layers: 1,
+                    temporal_id_nested: false,
+                    length_size: 4,
+                    arrays: Vec::new(),
+                },
+                w,
+                h,
+            )
+        } else {
+            SampleEntry::avc(AvcConfig::new(Vec::new(), Vec::new(), 4), w, h)
+        }
+    }
+
     /// Move newly arrived packets into `out`; a reader failure kills the child and becomes
     /// an error carrying ffmpeg's stderr tail.
     fn drain(&mut self, out: &mut Vec<EncodedPacket>) -> Result<()> {
+        self.take_stash(out);
         for msg in self.rx.try_iter() {
             match msg {
-                WorkerMsg::Init(_) => {}
+                WorkerMsg::Init(e) => {
+                    *self.entry.lock().unwrap_or_else(|p| p.into_inner()) = Some(*e);
+                }
                 WorkerMsg::Packets { packets, first_cto } => {
                     if self.media_start.is_none() {
                         self.media_start = first_cto.filter(|c| *c > 0);
@@ -458,7 +522,56 @@ impl Drop for FfmpegEncoder {
 
 impl VideoEncoder for FfmpegEncoder {
     fn sample_entry(&self) -> SampleEntry {
-        self.sample_entry.clone()
+        if let Some(e) = self.entry.lock().unwrap_or_else(|p| p.into_inner()).clone() {
+            return e;
+        }
+        // The pipeline encodes frames before it asks for the entry (the muxer opens after
+        // the first encode batch), so ffmpeg has input and its init segment is on its way.
+        // Wait for it here; anything arriving alongside is stashed for `encode`/`flush`,
+        // and a failure is deferred to them (this method cannot return one).
+        let deadline = Instant::now() + INIT_TIMEOUT;
+        loop {
+            if let Some(e) = self.entry.lock().unwrap_or_else(|p| p.into_inner()).clone() {
+                return e;
+            }
+            if self.deferred.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
+                break;
+            }
+            let Some(remain) = deadline.checked_duration_since(Instant::now()) else {
+                let mut d = self.deferred.lock().unwrap_or_else(|p| p.into_inner());
+                if d.is_none() {
+                    *d = Some("timed out waiting for the MP4 init segment".into());
+                }
+                break;
+            };
+            match self.rx.recv_timeout(remain) {
+                Ok(WorkerMsg::Init(e)) => {
+                    let e = *e;
+                    *self.entry.lock().unwrap_or_else(|p| p.into_inner()) = Some(e.clone());
+                    return e;
+                }
+                Ok(WorkerMsg::Packets { packets, first_cto }) => {
+                    let mut stash = self.stash.lock().unwrap_or_else(|p| p.into_inner());
+                    if stash.is_empty() {
+                        *self.stash_cto.lock().unwrap_or_else(|p| p.into_inner()) = first_cto;
+                    }
+                    stash.extend(packets);
+                }
+                Ok(WorkerMsg::Error(e)) => {
+                    *self.deferred.lock().unwrap_or_else(|p| p.into_inner()) = Some(e);
+                    break;
+                }
+                Ok(WorkerMsg::Done) => {
+                    *self.deferred.lock().unwrap_or_else(|p| p.into_inner()) = Some("ffmpeg ended before its init segment".into());
+                    break;
+                }
+                Err(_) => {
+                    *self.deferred.lock().unwrap_or_else(|p| p.into_inner()) = Some("timed out waiting for the MP4 init segment".into());
+                    break;
+                }
+            }
+        }
+        self.placeholder_entry()
     }
 
     fn timescale(&self) -> u32 {
@@ -468,6 +581,9 @@ impl VideoEncoder for FfmpegEncoder {
     fn encode(&mut self, f: &EncoderFrame) -> Result<Vec<EncodedPacket>> {
         if self.stdin.is_none() || self.dead {
             return Err(ExportError::Encode("ffmpeg: encode after the encoder ended".into()));
+        }
+        if let Some(e) = self.take_deferred_error() {
+            return Err(e);
         }
         let mut out = Vec::new();
         self.drain(&mut out)?;
@@ -511,12 +627,18 @@ impl VideoEncoder for FfmpegEncoder {
         if self.dead {
             return Err(ExportError::Encode("ffmpeg: the encoder already failed".into()));
         }
+        if let Some(e) = self.take_deferred_error() {
+            return Err(e);
+        }
         // closing stdin is ffmpeg's end-of-stream: it drains its encoder and exits
         drop(self.stdin.take());
         let mut out = Vec::new();
+        self.take_stash(&mut out);
         loop {
             match self.rx.recv() {
-                Ok(WorkerMsg::Init(_)) => {}
+                Ok(WorkerMsg::Init(e)) => {
+                    *self.entry.lock().unwrap_or_else(|p| p.into_inner()) = Some(*e);
+                }
                 Ok(WorkerMsg::Packets { packets, first_cto }) => {
                     if self.media_start.is_none() {
                         self.media_start = first_cto.filter(|c| *c > 0);
