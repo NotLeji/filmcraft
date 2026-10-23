@@ -2,10 +2,12 @@
 //!
 //! The binary is `FILMCRAFT_FFMPEG` when set, else `ffmpeg` on `PATH`; both are verified by
 //! running `ffmpeg -version`, so a stale path degrades to "no ffmpeg" instead of a confusing
-//! spawn failure later. Encoder choice is probed once per process (`ffmpeg -h encoder=<name>`)
-//! and cached: hardware first per OS, then the software fallback, so machines without any
-//! hardware encoder still export (and CI, which has no GPU, exercises the whole pipeline
-//! through `libx264` / `libx265`).
+//! spawn failure later. Encoder choice is probed once per process and cached: each candidate
+//! must pass an actual six-frame test encode (an `ffmpeg -h` listing only proves the encoder
+//! is compiled in, not that it opens — `hevc_qsv` on a Kaby Lake iGPU lists fine and then
+//! fails with MFX_ERR_UNSUPPORTED). Hardware first per OS, then the software fallback, so
+//! machines without any hardware encoder still export (and CI, which has no GPU, exercises the
+//! whole pipeline through `libx264` / `libx265`).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -65,9 +67,43 @@ pub fn ffmpeg_binary() -> Option<PathBuf> {
     BINARY.get_or_init(find_binary).clone()
 }
 
-/// Whether this ffmpeg build ships `name` (`ffmpeg -h encoder=<name>` exits 0).
-fn encoder_runs(bin: &Path, name: &str) -> bool {
+/// The VAAPI render device (`/dev/dri/renderD*`) for `_vaapi` encoders: the first node that
+/// exists, or `None` when this machine has none. VAAPI is the one encoder family that cannot
+/// find a device on its own — the node has to be spelled out on the command line
+/// (`-vaapi_device`), for the probe's test encode here and for the real export in
+/// `super::export::argv`.
+pub fn vaapi_device() -> Option<String> {
+    (128..=135).map(|n| format!("/dev/dri/renderD{n}")).find(|p| Path::new(p).exists())
+}
+
+/// Whether this ffmpeg build ships `name` (`ffmpeg -h encoder=<name>` exits 0): a cheap
+/// first filter before the real test encode.
+fn encoder_listed(bin: &Path, name: &str) -> bool {
     Command::new(bin).arg("-hide_banner").arg("-h").arg(format!("encoder={name}")).output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// Whether `name` really encodes on this machine: a six-frame lavfi encode to the null
+/// muxer, set up exactly as the export itself would be (VAAPI gets its device and the
+/// hwupload filter, see [`vaapi_device`]); only the input differs (generated, not piped).
+/// A listed encoder that cannot open (a QSV generation without HEVC, an NVENC with no GPU
+/// behind it) fails here and selection moves on to the next candidate.
+fn encoder_runs(bin: &Path, name: &str) -> bool {
+    if !encoder_listed(bin, name) {
+        return false;
+    }
+    let vaapi = name.ends_with("_vaapi");
+    let mut cmd = Command::new(bin);
+    cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
+    if vaapi {
+        let Some(dev) = vaapi_device() else { return false; };
+        cmd.arg("-vaapi_device").arg(dev);
+    }
+    cmd.args(["-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=0.2"]);
+    if vaapi {
+        cmd.args(["-vf", "format=nv12,hwupload"]);
+    }
+    cmd.args(["-c:v", name, "-f", "null", "-"]);
+    cmd.output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 /// Parse [`ENV_ENCODER`]'s value for `codec`: `Some(name)` from `h264:<name>,hevc:<name>`
@@ -98,7 +134,7 @@ fn forced_encoder(codec: Codec) -> Option<&'static str> {
 }
 
 /// The ffmpeg encoder to use for `codec`: the [`ENV_ENCODER`] override, else the first
-/// candidate the local ffmpeg build ships (cached per codec).
+/// candidate that passes the test encode (cached per codec).
 pub fn select_encoder(codec: Codec) -> Option<&'static str> {
     static H264: OnceLock<Option<&'static str>> = OnceLock::new();
     static HEVC: OnceLock<Option<&'static str>> = OnceLock::new();

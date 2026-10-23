@@ -201,11 +201,23 @@ fn bitrate_args(flag: &str, kbps: u32, out: &mut Vec<String>) {
 
 /// The ffmpeg command line for `cfg` (without the binary itself).
 fn argv(cfg: &FfmpegConfig) -> std::result::Result<Vec<String>, String> {
+    let vaapi = cfg.encoder.ends_with("_vaapi");
     let mut a = vec![
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
         "error".to_string(),
         "-nostdin".to_string(),
+    ];
+    if vaapi {
+        // VAAPI cannot find a device on its own: name the render node before the input.
+        // The probe only picks a VAAPI encoder when a node exists; the conventional first
+        // node is the fallback so this function stays total (unit tests spell commands on
+        // machines without a GPU).
+        let dev = probe::vaapi_device().unwrap_or_else(|| "/dev/dri/renderD128".to_string());
+        a.push("-vaapi_device".to_string());
+        a.push(dev);
+    }
+    a.extend([
         "-f".to_string(),
         "rawvideo".to_string(),
         "-pix_fmt".to_string(),
@@ -216,10 +228,14 @@ fn argv(cfg: &FfmpegConfig) -> std::result::Result<Vec<String>, String> {
         format!("{num}/{den}", num = cfg.fps_num, den = cfg.fps_den),
         "-i".to_string(),
         "pipe:0".to_string(),
-        "-an".to_string(),
-        "-c:v".to_string(),
-        cfg.encoder.clone(),
-    ];
+    ]);
+    if vaapi {
+        // The piped frames live in system memory; VAAPI surfaces need them uploaded
+        // (and in nv12, the layout the encoders take).
+        a.push("-vf".to_string());
+        a.push("format=nv12,hwupload".to_string());
+    }
+    a.extend(["-an".to_string(), "-c:v".to_string(), cfg.encoder.clone()]);
     let mut rate = Vec::new();
     rate_args(&cfg.encoder, &cfg.rate, &mut rate)?;
     a.extend(rate);
@@ -700,8 +716,11 @@ mod tests {
         assert!(nvenc.contains("-c:v hevc_nvenc -rc constqp -qp 20"), "{nvenc}");
         let nvenc_cbr = args("h264_nvenc", BitrateMode::Cbr);
         assert!(nvenc_cbr.contains("-rc cbr -b:v 4000k -maxrate 6000k"), "{nvenc_cbr}");
-        // VA-API: plain -qp
-        assert!(args("h264_vaapi", BitrateMode::Cqp).contains("-qp 20"));
+        // VA-API: plain -qp, plus the device and the surface upload it cannot run without
+        let vaapi = args("h264_vaapi", BitrateMode::Cqp);
+        assert!(vaapi.contains("-qp 20"), "{vaapi}");
+        assert!(vaapi.contains("-vaapi_device /dev/dri/renderD"), "{vaapi}");
+        assert!(vaapi.contains("-vf format=nv12,hwupload"), "{vaapi}");
         // AMF: per-picture-type QPs
         let amf = args("hevc_amf", BitrateMode::Cqp);
         assert!(amf.contains("-rc cqp -qp_i 20 -qp_p 20"), "{amf}");
