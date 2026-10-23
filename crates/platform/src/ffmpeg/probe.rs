@@ -95,7 +95,9 @@ fn encoder_runs(bin: &Path, name: &str) -> bool {
     let mut cmd = Command::new(bin);
     cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
     if vaapi {
-        let Some(dev) = vaapi_device() else { return false; };
+        let Some(dev) = vaapi_device() else {
+            return false;
+        };
         cmd.arg("-vaapi_device").arg(dev);
     }
     cmd.args(["-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=0.2"]);

@@ -202,12 +202,7 @@ fn bitrate_args(flag: &str, kbps: u32, out: &mut Vec<String>) {
 /// The ffmpeg command line for `cfg` (without the binary itself).
 fn argv(cfg: &FfmpegConfig) -> std::result::Result<Vec<String>, String> {
     let vaapi = cfg.encoder.ends_with("_vaapi");
-    let mut a = vec![
-        "-hide_banner".to_string(),
-        "-loglevel".to_string(),
-        "error".to_string(),
-        "-nostdin".to_string(),
-    ];
+    let mut a = vec!["-hide_banner".to_string(), "-loglevel".to_string(), "error".to_string(), "-nostdin".to_string()];
     if vaapi {
         // VAAPI cannot find a device on its own: name the render node before the input.
         // The probe only picks a VAAPI encoder when a node exists; the conventional first
