@@ -26,8 +26,8 @@
 
 use std::io::{BufReader, Read as _, Write as _};
 use std::process::{Child, ChildStdin, Stdio};
-use std::sync::mpsc::{Receiver, channel};
 use std::sync::Mutex;
+use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use filmcraft_export::{
