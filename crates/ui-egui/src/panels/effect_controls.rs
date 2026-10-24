@@ -197,9 +197,18 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             // Premiere lists the fixed effects (Motion, Opacity, Time Remapping / Volume…) first.
             let mut order: Vec<usize> = (0..it.effects.len()).collect();
             order.sort_by_key(|i| !it.effects[*i].def().is_some_and(|d| d.intrinsic));
+            let mut after_fixed = false;
             for idx in order {
                 let e = &it.effects[idx];
                 let Some(def) = e.def() else { continue };
+                // the first effect added from the library after the fixed ones gets a line on top
+                // (#2328); drawn on its edge, so no row moves
+                let first_added = if def.intrinsic {
+                    after_fixed = true;
+                    false
+                } else {
+                    std::mem::take(&mut after_fixed)
+                };
                 let key = format!("{}:{}", clip.0, idx);
                 let open = !app.ui.collapsed_fx.contains(&key);
                 let selected = app.session.state.selected_effect.as_ref().is_some_and(|s| s.clip == clip && s.index(&it.effects) == Some(idx));
@@ -210,6 +219,12 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     bui.painter().rect_filled(crate::panels::effect_controls::row_fill(r), 0.0, t.hover);
                 }
                 row_line(bui, r, &lane, &t);
+                if first_added {
+                    let line = Rect::from_min_max(pos2(r.min.x, r.min.y - 1.0), pos2(r.max.x, r.min.y + 1.0));
+                    bui.painter().rect_filled(line, 0.0, t.accent.gamma_multiply(0.8));
+                    let which = if *kind == TrackKind::Video { "video" } else { "audio" };
+                    app.auto.add(&format!("effectControls.addedEffects.{which}"), line, "Added effects");
+                }
                 // only the arrow twirls the effect open or shut; the rest of the header selects it
                 let tw = Rect::from_center_size(pos2(r.min.x + 10.0, r.center().y), vec2(10.0, 10.0));
                 icons::paint(bui.painter(), tw, if open { Icon::ChevronDown } else { Icon::ChevronRight }, t.text_dim);

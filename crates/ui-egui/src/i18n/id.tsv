@@ -1271,6 +1271,7 @@
 	59.94 fps Non Drop-Frame	59,94 fps Non Drop-Frame
 	ASC CDL	ASC CDL
 	Accessible color contrast	Kontras warna yang aksesibel
+	Animate zoom, scrolling and menus	Animasikan zoom, gulir, dan menu
 	Action-Safe Margin	Margin Aman Aksi
 	Active Monitor	Monitor Aktif
 	Add	Tambah
@@ -3566,6 +3567,8 @@
 	Text to Speech	Teks ke Ucapan
 	Edit Narration	Edit Narasi
 	Project Notes	Catatan Proyek
+	CQP (constant quantizer)	CQP (kuantizer konstan)
+	Quality (CQP)	Kualitas (CQP)
 	Get Project Notes	Ambil Catatan Proyek
 	Edit Project Notes	Edit Catatan Proyek
 	Notes for this project: to-dos, instructions, frame numbers… Saved with the project.	Catatan untuk proyek ini: daftar tugas, instruksi, nomor bingkai… Disimpan bersama proyek.
@@ -3575,5 +3578,9 @@
 	Appearance Settings…	Pengaturan Tampilan…
 	Add to favorites	Tambahkan ke favorit
 	Remove from favorites	Hapus dari favorit
-	CQP (constant quantizer)	CQP (kuantizer konstan)
-	Quality (CQP)	Kualitas (CQP)
+# View ▸ Reset Interface Zoom (#2253).
+	Reset Interface Zoom	Atur Ulang Zoom Antarmuka
+	Track Color	Warna Trek
+	Open a sequence to search its graphics	Buka sekuens untuk mencari di grafisnya
+	No text graphics in this sequence. Add text with the Type tool.	Tidak ada grafis teks di sekuens ini. Tambahkan teks dengan alat Teks.
+	No matching text.	Tidak ada teks yang cocok.
