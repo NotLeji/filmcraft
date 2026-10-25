@@ -99,16 +99,35 @@ impl Rgba {
 /// A frame pixel (sRGB of the linear color premultiplied by alpha) as egui's color, which is the
 /// sRGB of the straight color multiplied by alpha.
 fn gamma_premultiplied([r, g, b, a]: [u8; 4]) -> egui::Color32 {
-    use egui::ecolor::{gamma_u8_from_linear_f32, linear_f32_from_gamma_u8};
     match a {
         255 => egui::Color32::from_rgb(r, g, b),
         0 => egui::Color32::TRANSPARENT,
         _ => {
-            let k = f32::from(a) / 255.0;
-            let straight = |v: u8| gamma_u8_from_linear_f32((linear_f32_from_gamma_u8(v) / k).min(1.0));
+            let straight = |v: u8| straight_srgb(a, v);
             egui::Color32::from_rgba_unmultiplied(straight(r), straight(g), straight(b), a)
         }
     }
+}
+
+/// The sRGB of the straight color whose premultiplied value is sRGB `v` at alpha `a`, from a table
+/// made on first use: a frame with partial alpha would otherwise take two `powf` per channel per
+/// pixel on every upload.
+fn straight_srgb(a: u8, v: u8) -> u8 {
+    static TABLE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        use egui::ecolor::{gamma_u8_from_linear_f32, linear_f32_from_gamma_u8};
+        let mut t = vec![0u8; 256 * 256];
+        for a in 1..=255u8 {
+            let k = f32::from(a) / 255.0;
+            for v in 0..=255u8 {
+                if let Some(x) = t.get_mut(usize::from(a) * 256 + usize::from(v)) {
+                    *x = gamma_u8_from_linear_f32((linear_f32_from_gamma_u8(v) / k).min(1.0));
+                }
+            }
+        }
+        t
+    });
+    table.get(usize::from(a) * 256 + usize::from(v)).copied().unwrap_or(v)
 }
 
 struct Job {
@@ -1025,6 +1044,17 @@ mod tests {
         // the scopes ask for the program frame at 40 while playing: never background
         assert!(!background_work(40, Target::Sequence(ItemId(1))));
         assert!(!background_work(50, Target::SequencePlan(ItemId(1))));
+    }
+
+    #[test]
+    fn the_straight_color_table_matches_the_formula() {
+        use egui::ecolor::{gamma_u8_from_linear_f32, linear_f32_from_gamma_u8};
+        for a in 1..=255u8 {
+            for v in 0..=255u8 {
+                let want = gamma_u8_from_linear_f32((linear_f32_from_gamma_u8(v) / (f32::from(a) / 255.0)).min(1.0));
+                assert_eq!(super::straight_srgb(a, v), want, "a {a} v {v}");
+            }
+        }
     }
 
     #[test]

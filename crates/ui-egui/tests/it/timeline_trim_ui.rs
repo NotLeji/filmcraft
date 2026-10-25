@@ -204,6 +204,12 @@ fn duplicate_frame_markers_stay_inside_a_clip_being_trimmed() {
             .map(|e| (e["rect"][0].as_f64().expect("x") + e["rect"][2].as_f64().expect("w")) as f32)
             .fold(f32::MIN, f32::max)
     };
+    // the markers are worked out on a background thread
+    let t0 = std::time::Instant::now();
+    while stripe_right(&mut d) == f32::MIN && t0.elapsed().as_secs() < 30 {
+        d.frames(1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     assert!((stripe_right(&mut d) - x1).abs() <= 2.0, "the stripe runs to the Out edge");
     // press on the Out edge and move half the clip inward, without releasing
     let push = |d: &mut Driver, e: egui::Event| d.harness.input_mut().events.push(e);
