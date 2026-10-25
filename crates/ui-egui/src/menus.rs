@@ -91,6 +91,8 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("view.addGuide", "Add Guide…", ["View"], None),
     uic!("view.clearGuides", "Clear Guides", ["View"], None),
     uic!("view.snapInProgramMonitor", "Snap in Program Monitor", ["View"], None),
+    // the monitors' wrench menus only, as in the reference app
+    uic!("view.transparencyGrid", "Transparency Grid", [], None),
     uic!("view.safeMargins", "Safe Margins", ["View", "Guide Templates"], None),
     uic!("view.guideTemplates.save", "Save Guides as Template…", ["View", "Guide Templates"], None),
     uic!("view.guideTemplates.manage", "Manage Guides…", ["View", "Guide Templates"], None),
