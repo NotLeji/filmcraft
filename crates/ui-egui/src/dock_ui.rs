@@ -477,6 +477,12 @@ impl DockContent<PanelKind> for FilmContent<'_> {
         }
     }
 
+    /// A native floating window drew its last body: its end-of-pass IME check, for the Program
+    /// monitor's text editor when it is there.
+    fn window_drawn(&mut self, ui: &mut egui::Ui) {
+        self.app.finish_ime_window(ui.ctx());
+    }
+
     fn logical_label(&self, panel: &PanelKind) -> String {
         crate::i18n::t(panel.title()).to_string()
     }

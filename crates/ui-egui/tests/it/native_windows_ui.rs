@@ -10,21 +10,48 @@ use filmcraft_ui_egui::FilmcraftApp;
 use filmcraft_ui_egui::control::ControlRequest;
 use serde_json::{Value, json};
 
+/// What the tests give the native windows and what the windows publish. A test drives at most
+/// one native window at a time.
+#[derive(Default)]
+struct WindowIo {
+    focused: bool,
+    events: Vec<egui::Event>,
+    ime: Option<egui::output::IMEOutput>,
+    reset_requests: Vec<egui::ImeResetId>,
+}
+
+thread_local! {
+    static WINDOW: std::cell::RefCell<WindowIo> = std::cell::RefCell::new(WindowIo::default());
+}
+
 /// Native windows at their builders' places, reporting that place as their desktop rect.
 fn native_host() {
+    WINDOW.with(|w| *w.borrow_mut() = WindowIo::default());
     egui::Context::set_immediate_viewport_renderer(|ctx, mut viewport| {
         let size = viewport.builder.inner_size.unwrap_or(egui::vec2(400.0, 300.0));
         let place = egui::Rect::from_min_size(viewport.builder.position.unwrap_or_default(), size);
         let id = viewport.ids.this;
-        let info = egui::ViewportInfo { inner_rect: Some(place), outer_rect: Some(place), focused: Some(false), ..Default::default() };
+        let (focused, events) = WINDOW.with(|w| {
+            let mut w = w.borrow_mut();
+            (w.focused, std::mem::take(&mut w.events))
+        });
+        let info = egui::ViewportInfo { inner_rect: Some(place), outer_rect: Some(place), focused: Some(focused), ..Default::default() };
         let input = egui::RawInput {
             viewport_id: id,
             viewports: std::iter::once((id, info)).collect(),
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
             time: ctx.input(|i| Some(i.time)),
+            focused,
+            events,
             ..Default::default()
         };
-        ctx.run_ui(input, |ui| (viewport.viewport_ui_cb)(ui)).textures_delta.clear();
+        let mut out = ctx.run_ui(input, |ui| (viewport.viewport_ui_cb)(ui));
+        out.textures_delta.clear();
+        WINDOW.with(|w| {
+            let mut w = w.borrow_mut();
+            w.reset_requests.extend(out.platform_output.ime.as_ref().and_then(|ime| ime.reset_request));
+            w.ime = out.platform_output.ime;
+        });
     });
 }
 
@@ -43,7 +70,10 @@ impl Driver {
         s.execute("source.open", json!({"item": source})).unwrap();
         let (tx, rx) = channel();
         let app = FilmcraftApp::new(s).with_control(rx);
-        let harness = Harness::builder().with_size(egui::vec2(1600.0, 980.0)).with_max_steps(10_000).build_eframe(move |_cc| app);
+        let harness = Harness::builder().with_size(egui::vec2(1600.0, 980.0)).with_max_steps(10_000).build_eframe(move |cc| {
+            filmcraft_ui_egui::install_ime_reset_callbacks(&cc.egui_ctx);
+            app
+        });
         let mut d = Driver { harness, tx };
         d.harness.ctx.set_embed_viewports(false);
         // A main window that reports its desktop place, as under X11: craft-ui otherwise keeps
@@ -176,4 +206,67 @@ fn a_source_drag_drops_on_a_timeline_in_its_own_window() {
     d.pointer(to, Some(false));
     d.frames(3);
     assert_eq!(clips(&d), 1, "status: {}", d.app().ui.status);
+}
+
+/// The window's events for its next frame, and that frame.
+fn window_frame(d: &mut Driver, events: Vec<egui::Event>) {
+    WINDOW.with(|w| w.borrow_mut().events.extend(events));
+    d.frames(1);
+}
+
+fn window_ime() -> Option<egui::output::IMEOutput> {
+    WINDOW.with(|w| w.borrow().ime.clone())
+}
+
+fn ime_preedit(text: &str) -> egui::Event {
+    egui::Event::Ime(egui::ImeEvent::Preedit { text: text.into(), active_range_chars: None })
+}
+
+fn ime_commit(text: &str) -> egui::Event {
+    egui::Event::Ime(egui::ImeEvent::Commit(text.into()))
+}
+
+/// The Program monitor's text editor in its own OS window: the window publishes the composer's
+/// descriptor every pass, so the marked text survives; a click while composing suspends the
+/// window's reset fence, the window's next pass rearms it, and its completion admits a commit.
+#[test]
+fn a_floating_program_monitor_composes_and_rearms_its_ime_fence() {
+    let mut d = Driver::new(5);
+    let clip = d.ok("engine.execute", json!({"command": "graphics.newText", "params": {"text": "alpha", "position": [640, 360], "size": 120}}))["clip"]
+        .as_u64()
+        .unwrap();
+    d.float("Program", [900.0, 120.0, 680.0, 520.0]);
+    WINDOW.with(|w| w.borrow_mut().focused = true);
+    d.ok("ui.set", json!({"gfxEdit": {"clip": clip, "layer": 0, "caret": 5, "anchor": 5}}));
+    d.frames(3);
+    let text = |d: &mut Driver| d.ok("engine.execute", json!({"command": "graphics.list", "params": {"clip": clip}}))["layers"][0]["text"].clone();
+    let first = window_ime().expect("the floating editor publishes in its own window");
+
+    window_frame(&mut d, vec![ime_preedit("に")]);
+    for _ in 0..3 {
+        d.frames(1);
+        let ime = window_ime().expect("the window keeps publishing while composing");
+        assert_eq!((ime.owner, ime.context_generation), (first.owner, first.context_generation), "the same IME context");
+        assert!(!ime.should_interrupt_composition);
+    }
+    let preedit = d.element("program.textEdit.preedit");
+    assert_eq!(preedit["label"], json!("に"), "the marked text is drawn in the window");
+    assert!(preedit["window"].is_u64(), "{preedit}");
+    window_frame(&mut d, vec![ime_preedit(""), ime_commit("日本")]);
+    assert_eq!(text(&mut d), json!("alpha日本"));
+
+    // A click in the text while composing suspends the window's fence.
+    let at = rect(&d.element("program.textEdit")).center();
+    window_frame(&mut d, vec![ime_preedit("ご")]);
+    let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+    WINDOW.with(|w| w.borrow_mut().reset_requests.clear());
+    window_frame(&mut d, vec![egui::Event::PointerMoved(at), press(true)]);
+    window_frame(&mut d, vec![press(false)]);
+    d.frames(2);
+    let fence = WINDOW.with(|w| w.borrow().reset_requests.last().copied()).expect("the window's next passes rearm its fence");
+    window_frame(&mut d, vec![ime_commit("x")]);
+    assert_eq!(text(&mut d), json!("alpha日本ご"), "the fence blocks a commit until it completes");
+    window_frame(&mut d, vec![egui::Event::ImeResetCompleted { request_id: fence }, ime_preedit("が"), ime_commit("が")]);
+    let after = text(&mut d);
+    assert!(after.as_str().is_some_and(|t| t.contains('が')), "the completed fence admits the commit: {after}");
 }

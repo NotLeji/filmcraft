@@ -70,7 +70,7 @@ use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
-use egui::ime_context::{ImeContextTracker, ImeTarget};
+use egui::ime_context::ImeTarget;
 use egui::{TextureHandle, TextureOptions};
 use filmcraft_engine::{Services, Session};
 use filmcraft_time::Tick;
@@ -308,27 +308,28 @@ pub struct FilmcraftApp {
     /// The native file dialog the host is showing ([`Self::pick`]).
     native_dialog: Option<native_dialogs::PendingDialog>,
     pub auto: automation::Registry,
-    /// IME owner/generation/cause state for the custom editors on the Program monitor. State is
-    /// kept per egui viewport; a closed viewport is released in [`eframe::App::on_exit`].
-    pub(crate) ime_context: ImeContextTracker,
     /// Bumped when the custom text edit target is (re)created, a sequence/document context
     /// changes, or a control request replaces `gfxEdit`. It is the replacement epoch of the
     /// otherwise stable sequence/clip/component owner.
     pub(crate) ime_replacement_epoch: u64,
-    /// The (viewport, cumulative pass) whose one IME observation has already been made.
-    ime_observed_pass: Option<(egui::ViewportId, u64)>,
     /// The composition in flight (including an empty preedit awaiting its terminal event), or a
     /// tombstone for a composition whose target was replaced or caret/focus was interrupted.
     pub(crate) ime_composition: Option<ImeComposition>,
     ime_reset: ime_reset::State,
     ime_composition_viewport: Option<egui::ViewportId>,
-    /// The editor drawn in this pass; the final observation runs after control drain.
+    /// The input method at the Program monitor's text caret: event order, the keys it uses, the
+    /// marked text drawn on the video until it commits, and the published IME descriptor.
+    pub(crate) ime_composer: craft_ui::ime::Composer,
+    /// The edit target `ime_composer` was made for; another target gets a new composer, so a
+    /// new IME context.
+    pub(crate) ime_composer_target: Option<ImeTarget>,
+    /// The editor drawn in this pass; the end-of-pass check runs after control drain.
     pub(crate) ime_drawn_editor: Option<panels::graphics::DrawnImeEditor>,
     /// Project document generation last seen by the UI (the engine bumps it on replacement).
     ime_document_epoch: u64,
     /// Active sequence last seen by the UI; `sequence.close` need not emit `OpenSequence`.
     ime_active_sequence: Option<filmcraft_project::ItemId>,
-    /// Viewports this app's custom IME producer has observed, released when the app exits.
+    /// Viewports the Program monitor's editor published in, released when the app exits.
     ime_viewports: Vec<egui::ViewportId>,
     /// Named textures (monitors, thumbnails) with the key they show.
     textures: HashMap<String, (FrameKey, TextureHandle)>,
@@ -644,12 +645,12 @@ impl FilmcraftApp {
             file_dialogs: Default::default(),
             native_dialog: None,
             auto: Default::default(),
-            ime_context: ImeContextTracker::new(),
             ime_replacement_epoch: 0,
-            ime_observed_pass: None,
             ime_composition: None,
             ime_reset: Default::default(),
             ime_composition_viewport: None,
+            ime_composer: craft_ui::ime::Composer::new(),
+            ime_composer_target: None,
             ime_drawn_editor: None,
             ime_document_epoch,
             ime_active_sequence,
@@ -732,7 +733,7 @@ impl FilmcraftApp {
     ///
     /// The owner key names the sequence, clip and component. A recreated edit session on the
     /// same key (or a document/sequence replacement) must not inherit the previous IME context,
-    /// so the app advances this epoch and the tracker resets the generation once.
+    /// so the app advances this epoch and the editor's next pass starts a new composer.
     pub(crate) fn restart_ime_target(&mut self) {
         self.ime_replacement_epoch = self.ime_replacement_epoch.wrapping_add(1);
         self.invalidate_ime_composition();
@@ -837,6 +838,31 @@ impl FilmcraftApp {
         self.ime_reset.finish(ctx, destination, self.ime_reset.owns_output(ctx));
     }
 
+    /// [`Self::ui`]'s end-of-pass IME check for a native floating window, after its last panel
+    /// body: the Program monitor's editor, when it was drawn there, keeps or drops the
+    /// composer's descriptor, and the window's reset fence suspends or rearms.
+    pub(crate) fn finish_ime_window(&mut self, ctx: &egui::Context) {
+        let viewport = ctx.viewport_id();
+        if self.ime_drawn_editor.as_ref().is_none_or(|drawn| drawn.viewport != viewport) {
+            self.ime_reset.suspend(viewport);
+            return;
+        }
+        self.ime_reset.viewport = viewport;
+        let focused = ctx.input(|input| input.viewport().focused.unwrap_or(input.focused));
+        let eligible = panels::graphics::finish_graphics_ime(self, ctx, false) && focused;
+        let destination = panels::graphics::current_reset_destination(self);
+        if !eligible {
+            self.suspend_ime_input(ctx);
+            self.ime_reset.finish_window(ctx, None, None);
+            return;
+        }
+        if let Some(destination) = destination {
+            self.sync_live_ime_destination(ctx, destination);
+        }
+        let output = self.ime_composer_target.and_then(|target| ime_reset::published(ctx, target.owner));
+        self.ime_reset.finish_window(ctx, destination, output);
+    }
+
     /// Notice a document replacement or an active-sequence change that did not emit
     /// `OpenSequence` (`file.newProject`, a project with no sequence, `sequence.close`). The
     /// edit target and any in-flight composition belong to the old context.
@@ -857,33 +883,17 @@ impl FilmcraftApp {
         ctx.data_mut(|data| data.remove::<PanelKind>(text_edit.with("panel")));
     }
 
-    /// Mark this viewport/pass as observed by the custom producer, so the end-of-pass fallback
-    /// does not observe it a second time.
-    pub(crate) fn note_ime_observed(&mut self, viewport: egui::ViewportId, pass_nr: u64) {
-        self.ime_observed_pass = Some((viewport, pass_nr));
+    /// Remember a viewport the Program monitor's editor published in, for [`eframe::App::on_exit`].
+    pub(crate) fn note_ime_viewport(&mut self, viewport: egui::ViewportId) {
         if !self.ime_viewports.contains(&viewport) {
             self.ime_viewports.push(viewport);
         }
     }
 
-    /// Observe `None` once for a pass where no visible, focused custom IME owner drew a
-    /// descriptor. This is the explicit hidden/unfocused signal the tracker needs; a gap alone
-    /// is a fallback, not a replacement for it.
+    /// The main window's end-of-pass check of the Program monitor's editor, after the pass's
+    /// control requests ran. Native floating windows ran theirs in [`Self::finish_ime_window`].
     pub(crate) fn finish_ime_pass(&mut self, ctx: &egui::Context) {
-        let viewport = ctx.viewport_id();
-        let pass_nr = ctx.cumulative_pass_nr_for(viewport);
-        // The Program monitor deferred its observation until all control requests for this pass
-        // have run. It reports `true` even when it observed an explicit `None` for a hidden or
-        // replaced editor.
-        if panels::graphics::finish_graphics_ime(self, ctx) {
-            return;
-        }
-        if self.ime_observed_pass == Some((viewport, pass_nr)) {
-            return;
-        }
-        // Availability retirement belongs to the unconditional outer reset finalizer.
-        self.ime_context.observe(viewport, None);
-        self.note_ime_observed(viewport, pass_nr);
+        let _ = panels::graphics::finish_graphics_ime(self, ctx, true);
     }
 
     /// Isolate an automation-owned app from native keyboard, pointer, drop and menu input.
@@ -2594,7 +2604,7 @@ impl FilmcraftApp {
     }
 
     /// Draw one real UI pass. Establish the UI clock offset once, run first-pass input handling,
-    /// draw panels under a panic guard, drain UI requests and observe the IME editor only after
+    /// draw panels under a panic guard, drain UI requests and check the IME editor only after
     /// this pass's commands ran. Screenshots are offered to `capture::issue`, which issues only
     /// on an accepted pass.
     fn ui_inner(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -2674,9 +2684,9 @@ impl FilmcraftApp {
         if !ctx.will_discard() {
             self.drain_ui_requests(&ctx);
         }
-        // Observe only after this pass's control requests ran: `ui.menu.invoke`/`engine.execute`
+        // Check only after this pass's control requests ran: `ui.menu.invoke`/`engine.execute`
         // may have edited the text or replaced the target. Every other pass (hidden editor, focus
-        // in another panel, no editor at all) reports an explicit `None`.
+        // in another panel, no editor at all) turns the composer off.
         self.finish_ime_pass(&ctx);
         // Ack `ui.*` waiters once the action had a final, non-discarded UI pass to apply in. Holding
         // them through a discard avoids reporting success for a pass egui threw away.
@@ -2757,16 +2767,14 @@ impl eframe::App for FilmcraftApp {
         self.finish_ime_reset_logic(ctx);
     }
 
-    /// Cancel outstanding screenshots with one error reply each, end per-viewport IME tracker and
-    /// reset state, and shut the session down so its recovery journal is flushed or removed.
+    /// Cancel outstanding screenshots with one error reply each, end per-viewport IME reset
+    /// state, and shut the session down so its recovery journal is flushed or removed.
     fn on_exit(&mut self) {
         // Late screenshot callbacks now find a dropped slot and write nothing; clients get one error.
         capture::cancel_all(self);
         for viewport in self.ime_viewports.drain(..) {
-            self.ime_context.end_viewport(viewport);
             self.ime_reset.end_viewport(viewport);
         }
-        self.ime_observed_pass = None;
         // Flush the recovery journal and stop the auto-save worker; a session with nothing unsaved
         // removes its journal, one with unsaved changes keeps it for the next launch.
         self.session.shutdown();
