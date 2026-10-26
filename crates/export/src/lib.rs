@@ -35,7 +35,7 @@ pub use pipeline::limit_rgba8;
 pub use presets::{ExportPreset, builtin_presets};
 pub use settings::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
 
 use filmcraft_isobmff::SampleEntry;
 use filmcraft_project::{ItemId, Project};
@@ -635,27 +635,7 @@ fn default_cqp() -> u8 {
 }
 
 impl ExportSettings {
-    /// Reject settings the encoders cannot honour.
-    pub fn validate(&self) -> Result<()> {
-        if let Some(range) = self.range {
-            validate_range(range)?;
-        }
-        if !self.scale.is_finite() || self.scale <= 0.0 {
-            return Err(ExportError::Unsupported("output scale must be finite and positive".into()));
-        }
-        if let Some((width, height)) = self.frame_size {
-            filmcraft_project::validate_frame_size(width, height).map_err(ExportError::Unsupported)?;
-        }
-        if let Some(rate) = self.frame_rate
-            && (rate.num <= 0
-                || rate.den <= 0
-                || rate.as_f64() > 1000.0
-                || rate.num > i64::from(u32::MAX)
-                || rate.den > i64::from(u32::MAX)
-                || (i128::from(filmcraft_time::TICKS_PER_SECOND) * i128::from(rate.den) / i128::from(rate.num.max(1))) > i128::from(Tick::MAX.0))
-        {
-            return Err(ExportError::Unsupported("output frame rate must be positive and at most 1000 fps".into()));
-        }
+    fn validate_audio_settings(&self) -> Result<()> {
         if self.audio.sample_rate.is_some_and(|rate| rate == 0 || rate > 384_000) {
             return Err(ExportError::Unsupported("output sample rate must be between 1 and 384000 Hz".into()));
         }
@@ -667,12 +647,10 @@ impl ExportSettings {
             let codec = if self.audio_codec() == AudioCodec::Flac { "FLAC" } else { self.format.label() };
             return Err(ExportError::Unsupported(format!("{codec} audio has no {} samples: choose 16, 24 or 32 bit", sample_format.label())));
         }
-        if self.field_order != FieldOrder::Progressive && self.has_video() {
-            return Err(ExportError::Unsupported(format!("{} field order: FilmCraft's encoders write progressive frames", self.field_order.label())));
-        }
-        if self.effects.image_overlay.enabled && self.effects.image_overlay.path.trim().is_empty() {
-            return Err(ExportError::Unsupported("image overlay: no image file chosen".into()));
-        }
+        Ok(())
+    }
+
+    fn validate_bitrate_mode(&self) -> Result<()> {
         if self.format == Format::Hevc && self.bitrate_mode == BitrateMode::Vbr2Pass {
             return Err(ExportError::Unsupported("H.265 export has no two-pass mode: choose CBR, VBR (1 pass) or CQP".into()));
         }
@@ -698,6 +676,38 @@ impl ExportSettings {
                 return Err(ExportError::Unsupported("CQP must be between 0 and 51".into()));
             }
         }
+        Ok(())
+    }
+
+    /// Reject settings the encoders cannot honour.
+    pub fn validate(&self) -> Result<()> {
+        if let Some(range) = self.range {
+            validate_range(range)?;
+        }
+        if !self.scale.is_finite() || self.scale <= 0.0 {
+            return Err(ExportError::Unsupported("output scale must be finite and positive".into()));
+        }
+        if let Some((width, height)) = self.frame_size {
+            filmcraft_project::validate_frame_size(width, height).map_err(ExportError::Unsupported)?;
+        }
+        if let Some(rate) = self.frame_rate
+            && (rate.num <= 0
+                || rate.den <= 0
+                || rate.as_f64() > 1000.0
+                || rate.num > i64::from(u32::MAX)
+                || rate.den > i64::from(u32::MAX)
+                || (i128::from(filmcraft_time::TICKS_PER_SECOND) * i128::from(rate.den) / i128::from(rate.num.max(1))) > i128::from(Tick::MAX.0))
+        {
+            return Err(ExportError::Unsupported("output frame rate must be positive and at most 1000 fps".into()));
+        }
+        self.validate_audio_settings()?;
+        if self.field_order != FieldOrder::Progressive && self.has_video() {
+            return Err(ExportError::Unsupported(format!("{} field order: FilmCraft's encoders write progressive frames", self.field_order.label())));
+        }
+        if self.effects.image_overlay.enabled && self.effects.image_overlay.path.trim().is_empty() {
+            return Err(ExportError::Unsupported("image overlay: no image file chosen".into()));
+        }
+        self.validate_bitrate_mode()?;
         Ok(())
     }
 }
@@ -733,7 +743,7 @@ impl Progress {
     /// [`Progress::eta`] at a given time (tests, and hosts with a clock of their own).
     pub fn eta_at(&self, now: web_time::Instant) -> Option<std::time::Duration> {
         let (done, total) = (self.done.load(Ordering::Relaxed), self.total.load(Ordering::Relaxed));
-        let mut pace = self.pace.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pace = self.pace.lock().unwrap_or_else(PoisonError::into_inner);
         pace.observe(now, done);
         if self.finished.load(Ordering::Relaxed) || done >= total {
             return None;
@@ -741,7 +751,7 @@ impl Progress {
         pace.eta(total - done)
     }
     fn set_status(&self, s: impl Into<String>) {
-        *self.status.lock().unwrap_or_else(|e| e.into_inner()) = s.into();
+        *self.status.lock().unwrap_or_else(PoisonError::into_inner) = s.into();
     }
 }
 
@@ -938,7 +948,7 @@ pub fn timed<T>(stage: Stage, f: impl FnOnce() -> T) -> T {
 /// Register a video encoder factory (tried before the built-in ones and those registered earlier).
 /// Registering the same factory twice is harmless.
 pub fn register_encoder(f: EncoderFactory) {
-    let mut g = video_factories().write().unwrap_or_else(|e| e.into_inner());
+    let mut g = video_factories().write().unwrap_or_else(PoisonError::into_inner);
     if !g.iter().any(|x| std::ptr::fn_addr_eq(*x, f)) {
         g.insert(0, f);
     }
@@ -946,7 +956,7 @@ pub fn register_encoder(f: EncoderFactory) {
 
 /// Whether `f` is among the registered video encoder factories (startup diagnostics, tests).
 pub fn encoder_registered(f: EncoderFactory) -> bool {
-    video_factories().read().unwrap_or_else(|e| e.into_inner()).iter().any(|x| std::ptr::fn_addr_eq(*x, f))
+    video_factories().read().unwrap_or_else(PoisonError::into_inner).iter().any(|x| std::ptr::fn_addr_eq(*x, f))
 }
 
 /// Renders one export frame on something other than the CPU reference renderer — today the GPU
@@ -976,7 +986,7 @@ fn frame_renderer_factories() -> &'static RwLock<Vec<FrameRendererFactory>> {
 /// Register a frame-renderer factory (tried before those registered earlier). Registering the
 /// same factory twice is harmless.
 pub fn register_frame_renderer(f: FrameRendererFactory) {
-    let mut g = frame_renderer_factories().write().unwrap_or_else(|e| e.into_inner());
+    let mut g = frame_renderer_factories().write().unwrap_or_else(PoisonError::into_inner);
     if !g.iter().any(|x| std::ptr::fn_addr_eq(*x, f)) {
         g.insert(0, f);
     }
@@ -984,21 +994,21 @@ pub fn register_frame_renderer(f: FrameRendererFactory) {
 
 /// Whether `f` is among the registered frame-renderer factories (startup diagnostics, tests).
 pub fn frame_renderer_registered(f: FrameRendererFactory) -> bool {
-    frame_renderer_factories().read().unwrap_or_else(|e| e.into_inner()).iter().any(|x| std::ptr::fn_addr_eq(*x, f))
+    frame_renderer_factories().read().unwrap_or_else(PoisonError::into_inner).iter().any(|x| std::ptr::fn_addr_eq(*x, f))
 }
 
 /// Clear the registered frame-renderer factories. Test-only: registration is a process-wide
 /// startup step and tests that register their own must not see each other's.
 #[cfg(test)]
 pub(crate) fn reset_frame_renderers_for_tests() {
-    frame_renderer_factories().write().unwrap_or_else(|e| e.into_inner()).clear();
+    frame_renderer_factories().write().unwrap_or_else(PoisonError::into_inner).clear();
     GPU_FRAMES.store(0, Ordering::Relaxed);
     GPU_FALLBACKS.store(0, Ordering::Relaxed);
 }
 
 /// Pick the first registered factory that can build a renderer for this host.
 pub(crate) fn build_frame_renderer() -> Option<Box<dyn FrameRenderer>> {
-    let g = frame_renderer_factories().read().unwrap_or_else(|e| e.into_inner());
+    let g = frame_renderer_factories().read().unwrap_or_else(PoisonError::into_inner);
     g.iter().filter_map(|f| f()).next()
 }
 
@@ -1042,7 +1052,7 @@ pub fn gpu_render_stats() -> GpuRenderStats {
     GpuRenderStats { frames: GPU_FRAMES.load(Ordering::Relaxed), fallbacks: GPU_FALLBACKS.load(Ordering::Relaxed) }
 }
 pub fn register_audio_encoder(f: AudioEncoderFactory) {
-    audio_factories().write().unwrap_or_else(|e| e.into_inner()).insert(0, f);
+    audio_factories().write().unwrap_or_else(PoisonError::into_inner).insert(0, f);
 }
 
 type FormatProbe = (Format, fn() -> bool);
@@ -1056,7 +1066,7 @@ fn format_probes() -> &'static RwLock<Vec<FormatProbe>> {
 /// works on this machine: `probe` runs when [`available`] asks (it should cache its answer).
 /// Registering the same probe twice is harmless.
 pub fn register_format_probe(format: Format, probe: fn() -> bool) {
-    let mut g = format_probes().write().unwrap_or_else(|e| e.into_inner());
+    let mut g = format_probes().write().unwrap_or_else(PoisonError::into_inner);
     if !g.iter().any(|(f, p)| *f == format && std::ptr::fn_addr_eq(*p, probe)) {
         g.push((format, probe));
     }
@@ -1072,7 +1082,7 @@ fn hdr_probes() -> &'static RwLock<Vec<FormatProbe>> {
 /// one: its encoders are hardware-only and not all of them take 10-bit pictures, so an HDR sequence
 /// exports as tone-mapped SDR unless a probe says otherwise. Registering the same probe twice is harmless.
 pub fn register_hdr_probe(format: Format, probe: fn() -> bool) {
-    let mut g = hdr_probes().write().unwrap_or_else(|e| e.into_inner());
+    let mut g = hdr_probes().write().unwrap_or_else(PoisonError::into_inner);
     if !g.iter().any(|(f, p)| *f == format && std::ptr::fn_addr_eq(*p, probe)) {
         g.push((format, probe));
     }
@@ -1081,7 +1091,7 @@ pub fn register_hdr_probe(format: Format, probe: fn() -> bool) {
 /// Whether a registered probe says the encoder of `format` writes HDR here (false without one).
 pub fn hdr_available(format: Format) -> bool {
     // the probes run outside the lock: one may take a while
-    let probes: Vec<fn() -> bool> = hdr_probes().read().unwrap_or_else(|e| e.into_inner()).iter().filter(|(f, _)| *f == format).map(|(_, p)| *p).collect();
+    let probes: Vec<fn() -> bool> = hdr_probes().read().unwrap_or_else(PoisonError::into_inner).iter().filter(|(f, _)| *f == format).map(|(_, p)| *p).collect();
     probes.into_iter().any(|p| p())
 }
 
@@ -1091,7 +1101,7 @@ pub fn available(format: Format) -> bool {
     if !Format::ALL.contains(&format) {
         return false;
     }
-    format.has_builtin_encoder() || format_probes().read().unwrap_or_else(|e| e.into_inner()).iter().any(|(f, probe)| *f == format && probe())
+    format.has_builtin_encoder() || format_probes().read().unwrap_or_else(PoisonError::into_inner).iter().any(|(f, probe)| *f == format && probe())
 }
 
 struct MjpegEncoder {
@@ -1818,7 +1828,7 @@ struct SharedBuf(Arc<Mutex<Vec<u8>>>);
 
 impl Write for SharedBuf {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(buf);
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).extend_from_slice(buf);
         Ok(buf.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -1948,7 +1958,7 @@ fn export_here(project: &Arc<Project>, seq: ItemId, settings: &ExportSettings, s
                 progress.set_status(format!("Exporting audio ({})", settings.format.label()));
             }
             a.measure(settings, sources, &cancelled)?;
-            *progress.loudness.lock().unwrap_or_else(|e| e.into_inner()) = a.loudness;
+            *progress.loudness.lock().unwrap_or_else(PoisonError::into_inner) = a.loudness;
             let mut out = Out::create(settings)?;
             let io = |e: std::io::Error| ExportError::Io(e.to_string());
             out.write_all(&head).map_err(io)?;
@@ -2046,7 +2056,7 @@ fn export_here(project: &Arc<Project>, seq: ItemId, settings: &ExportSettings, s
             if let Some(enc) = gif {
                 let buf = gif_buf.clone();
                 drop(enc);
-                let data = std::mem::take(&mut *buf.0.lock().unwrap_or_else(|e| e.into_inner()));
+                let data = std::mem::take(&mut *buf.0.lock().unwrap_or_else(PoisonError::into_inner));
                 total = write_output(settings, &settings.path, data)?;
             }
             (total, count)
