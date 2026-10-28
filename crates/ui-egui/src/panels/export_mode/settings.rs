@@ -527,7 +527,7 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
             } else if s.bitrate_mode == BitrateMode::Cqp {
                 row(ui, t, tl!("Quality (CQP)"), |ui| {
                     let mut cqp = f64::from(s.cqp);
-                    if drag(ui, reg, "export.video.cqp", &mut cqp, 0.0..=51.0, 1.0, "", 0) {
+                    if drag(ui, reg, "export.video.cqp", &mut cqp, DragOptions { range: 0.0..=51.0, speed: 1.0, suffix: "", decimals: 0 }) {
                         s.cqp = cqp.round().clamp(0.0, 51.0) as u8;
                     }
                 });
