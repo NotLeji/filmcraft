@@ -170,7 +170,6 @@ pub fn show_overwrite(app: &mut FilmcraftApp, ctx: &egui::Context) {
     if let Some(replace) = answer {
         app.answer_overwrite(replace);
     }
-
 }
 
 /// Draw the dialog if it is one of ours; returns Some(still open).
