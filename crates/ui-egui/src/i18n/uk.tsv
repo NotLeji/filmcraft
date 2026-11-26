@@ -364,6 +364,7 @@
 
 	CQP (constant quantizer)	CQP (constant quantizer)
 	Quality (CQP)	Quality (CQP)
+	Set Playhead	Установити курсор відтворення
 # Marker editing and shared custom colors
 	A range marker needs a positive duration	Тривалість маркера діапазону має бути додатною
 	Add Custom Color	Додати власний колір
